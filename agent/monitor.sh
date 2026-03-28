@@ -14,12 +14,27 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 SERVER_URL="${SERVER_URL:-http://localhost:3001}"
-SERVER_ID="${SERVER_ID:-$(hostname)-$(date +%s)}"
+SERVER_ID="${SERVER_ID:-$(hostname)-$(date +%s%3N)}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
+RETRY_INTERVAL="${RETRY_INTERVAL:-5}"
 LOG_FILE="${LOG_FILE:-/var/log/monitor-agent.log}"
 
+MONITOR_FILES="${MONITOR_FILES:-true}"
+MONITOR_CONNECTIONS="${MONITOR_CONNECTIONS:-true}"
+MONITOR_RESOURCES="${MONITOR_RESOURCES:-true}"
+
+MONITOR_FILES_LIST=(
+    "/etc/passwd"
+    "/etc/shadow"
+    "/etc/group"
+    "/etc/hosts"
+    "/root/.ssh/authorized_keys"
+    "/home/*/.ssh/authorized_keys"
+)
+
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE" 2>/dev/null || echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$msg" >> "$LOG_FILE" 2>/dev/null || echo "$msg"
 }
 
 check_command() {
@@ -35,16 +50,32 @@ get_file_hash() {
             md5 -r "$file" 2>/dev/null | awk '{print $1}'
         elif check_command sha256sum; then
             sha256sum "$file" 2>/dev/null | awk '{print $1}'
+        else
+            echo ""
         fi
+    else
+        echo ""
     fi
-    echo ""
 }
 
 get_cpu_usage() {
-    if check_command top; then
-        top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | tr -d ' '
-    elif check_command mpstat; then
-        mpstat 1 1 2>/dev/null | awk '/Average/ {print 100 - $NF}'
+    if [ -f /proc/stat ]; then
+        local cpu1=$(cat /proc/stat | grep '^cpu ' | awk '{print $2+$3+$4+$5+$6+$7+$8}')
+        local idle1=$(cat /proc/stat | grep '^cpu ' | awk '{print $5}')
+        sleep 1
+        local cpu2=$(cat /proc/stat | grep '^cpu ' | awk '{print $2+$3+$4+$5+$6+$7+$8}')
+        local idle2=$(cat /proc/stat | grep '^cpu ' | awk '{print $5}')
+        
+        local total_delta=$((cpu2 - cpu1))
+        local idle_delta=$((idle2 - idle1))
+        
+        if [ "$total_delta" -gt 0 ]; then
+            echo "scale=1; ($total_delta - $idle_delta) * 100 / $total_delta" | bc 2>/dev/null || echo "0"
+        else
+            echo "0"
+        fi
+    elif check_command top; then
+        top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | tr -d ' ' || echo "0"
     else
         echo "0"
     fi
@@ -54,15 +85,15 @@ get_memory_usage() {
     if [ -f /proc/meminfo ]; then
         local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
         local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+        
+        if [ -z "$available" ]; then
+            available=$(grep MemFree /proc/meminfo | awk '{print $2}')
+        fi
+        
         if [ -n "$total" ] && [ -n "$available" ]; then
             echo "scale=1; ($total - $available) * 100 / $total" | bc 2>/dev/null || echo "0"
         else
-            local free=$(grep MemFree /proc/meminfo | awk '{print $2}')
-            if [ -n "$total" ] && [ -n "$free" ]; then
-                echo "scale=1; ($total - $free) * 100 / $total" | bc 2>/dev/null || echo "0"
-            else
-                echo "0"
-            fi
+            echo "0"
         fi
     elif check_command vm_stat; then
         vm_stat 2>/dev/null | grep "Pages active" | awk '{print $3}' | tr -d '.' || echo "0"
@@ -89,38 +120,64 @@ get_connections() {
     echo "$connections"
 }
 
+check_port_listening() {
+    local port="$1"
+    if check_command ss; then
+        ss -ln 2>/dev/null | grep -q ":${port} " && return 0
+    elif check_command netstat; then
+        netstat -ln 2>/dev/null | grep -q ":${port} " && return 0
+    fi
+    return 1
+}
+
+init_hashes() {
+    declare -A FILE_HASHES
+    if [ "$MONITOR_FILES" = "true" ]; then
+        for file in "${MONITOR_FILES_LIST[@]}"; do
+            expanded_file=$(eval echo "$file" 2>/dev/null)
+            if [ -f "$expanded_file" ]; then
+                hash=$(get_file_hash "$expanded_file")
+                if [ -n "$hash" ]; then
+                    FILE_HASHES["$expanded_file"]="$hash"
+                fi
+            fi
+        done
+    fi
+}
+
 collect_file_changes() {
     local changes=""
-    for file in "${MONITOR_FILES[@]}"; do
-        expanded_file=$(eval echo "$file")
+    local has_changes=false
+    
+    for file in "${!FILE_HASHES[@]}"; do
+        expanded_file=$(eval echo "$file" 2>/dev/null)
         if [ -f "$expanded_file" ]; then
             new_hash=$(get_file_hash "$expanded_file")
-            key="hash_$(echo "$file" | tr '/' '_')"
-            old_hash="${!key}"
-            if [ -n "$old_hash" ] && [ "$new_hash" != "$old_hash" ]; then
+            old_hash="${FILE_HASHES[$file]}"
+            
+            if [ -n "$new_hash" ] && [ "$new_hash" != "$old_hash" ]; then
+                has_changes=true
                 changes="${changes}{\"path\":\"$expanded_file\",\"action\":\"modified\",\"oldHash\":\"$old_hash\",\"newHash\":\"$new_hash\"},"
             fi
-            declare "$key=$new_hash"
+            FILE_HASHES["$expanded_file"]="$new_hash"
         fi
     done
-    echo "$changes"
+    
+    if [ "$has_changes" = true ]; then
+        echo "${changes%,}"
+    fi
 }
 
 collect_data() {
     local type="$1"
-    local data="{"
-    data="${data}\"serverId\":\"$SERVER_ID\","
-    data="${data}\"timestamp\":$(date +%s000),"
-    data="${data}\"type\":\"$type\","
-    data="${data}\"data\":{"
-    
+    local data="{\"serverId\":\"$SERVER_ID\",\"timestamp\":$(date +%s000),\"type\":\"$type\",\"data\":{"
     local parts=""
     
     if [ "$MONITOR_RESOURCES" = "true" ]; then
         local cpu=$(get_cpu_usage)
         local memory=$(get_memory_usage)
         local disk=$(get_disk_usage)
-        parts="${parts}\"resources\":{\"cpu\":${cpu},\"memory\":${memory},\"disk\":${disk}}"
+        parts="${parts}\"resources\":{\"cpu\":${cpu:-0},\"memory\":${memory:-0},\"disk\":${disk:-0}}"
     fi
     
     if [ "$MONITOR_CONNECTIONS" = "true" ]; then
@@ -137,87 +194,108 @@ collect_data() {
             if [ -n "$parts" ]; then
                 parts="${parts},"
             fi
-            parts="${parts}\"files\":[${changes%,}]"
+            parts="${parts}\"files\":[$changes]"
         fi
     fi
     
-    data="${data}${parts}}"
-    data="${data}}"
+    data="${data}${parts}}}"
     echo "$data"
 }
 
-send_sse() {
+send_heartbeat() {
+    local heartbeat="{\"serverId\":\"$SERVER_ID\",\"timestamp\":$(date +%s000),\"type\":\"heartbeat\"}"
+    printf "event: heartbeat\ndata: %s\n\n" "$heartbeat"
+}
+
+send_data() {
+    local data=$(collect_data "status_report")
+    printf "event: data\ndata: %s\n\n" "$data"
+}
+
+send_event() {
     local event="$1"
     local data="$2"
-    echo -e "event: ${event}\ndata: ${data}\n\n"
+    printf "event: %s\ndata: %s\n\n" "$event" "$data"
 }
 
 connect_sse() {
-    log "正在连接到 SSE 服务器: ${SERVER_URL}/sse/agent/${SERVER_ID}"
+    log "连接到 SSE 服务器: ${SERVER_URL}/sse/agent/${SERVER_ID}"
     
     while true; do
-        response=$(curl -s -N -m 65 \
+        curl -s -N \
             -H "Accept: text/event-stream" \
             -H "Cache-Control: no-cache" \
-            "${SERVER_URL}/sse/agent/${SERVER_ID}" 2>&1) &
-        curl_pid=$!
+            --connect-timeout 10 \
+            --max-time 60 \
+            "${SERVER_URL}/sse/agent/${SERVER_ID}" 2>&1 | while IFS= read -r line; do
+            echo "$line"
+        done &
+        CURL_PID=$!
         
-        sleep 2
+        LAST_SEND=0
         
-        if kill -0 $curl_pid 2>/dev/null; then
-            log "SSE 连接已建立"
+        while kill -0 $CURL_PID 2>/dev/null; do
+            CURRENT_TIME=$(date +%s)
             
-            while true; do
-                if ! kill -0 $curl_pid 2>/dev/null; then
-                    log "SSE 连接断开，尝试重连..."
-                    break
-                fi
-                
-                data=$(collect_data "status_report")
-                echo "event: data"
-                echo "data: $data"
-                echo ""
-                
-                sleep "$HEARTBEAT_INTERVAL"
-            done
-        else
-            log "SSE 连接失败: $response"
+            if [ $((CURRENT_TIME - LAST_SEND)) -ge "$HEARTBEAT_INTERVAL" ]; then
+                send_heartbeat
+                send_data
+                LAST_SEND=$CURRENT_TIME
+            fi
+            
+            sleep 1
+        done
+        
+        wait $CURL_PID 2>/dev/null
+        CURL_EXIT=$?
+        
+        if [ $CURL_EXIT -ne 0 ]; then
+            log "SSE 连接断开 (exit: $CURL_EXIT)，${RETRY_INTERVAL}秒后重连..."
         fi
         
-        log "等待 ${RETRY_INTERVAL} 秒后重连..."
         sleep "$RETRY_INTERVAL"
     done
 }
 
-init_hashes() {
-    if [ "$MONITOR_FILES" = "true" ]; then
-        for file in "${MONITOR_FILES[@]}"; do
-            expanded_file=$(eval echo "$file")
-            if [ -f "$expanded_file" ]; then
-                hash=$(get_file_hash "$expanded_file")
-                key="hash_$(echo "$file" | tr '/' '_')"
-                declare "$key=$hash"
-            fi
-        done
-    fi
+daemonize() {
+    log "以守护进程模式启动"
+    exec "$0" >> "$LOG_FILE" 2>&1 &
 }
 
-main() {
-    log "=========================================="
-    log "服务器监控代理启动"
+status_check() {
+    log "========== 监控代理状态 =========="
     log "服务器ID: $SERVER_ID"
     log "服务端地址: $SERVER_URL"
     log "心跳间隔: ${HEARTBEAT_INTERVAL}秒"
-    log "=========================================="
+    log "监控文件: $MONITOR_FILES"
+    log "监控连接: $MONITOR_CONNECTIONS"
+    log "监控资源: $MONITOR_RESOURCES"
+    log "==================================="
     
-    init_hashes
-    connect_sse
+    log "测试数据收集..."
+    local test_data=$(collect_data "test")
+    log "测试数据: $test_data"
 }
 
-if [ "${1:-}" = "test" ]; then
-    log "测试模式 - 收集一次数据并退出"
-    data=$(collect_data "test")
-    log "数据: $data"
-else
-    main
-fi
+case "${1:-}" in
+    start)
+        main
+        ;;
+    daemon)
+        daemonize
+        ;;
+    test)
+        status_check
+        ;;
+    status)
+        status_check
+        ;;
+    *)
+        echo "用法: $0 {start|daemon|test|status}"
+        echo "  start   - 前台启动"
+        echo "  daemon  - 后台守护进程启动"
+        echo "  test    - 测试模式"
+        echo "  status  - 查看状态"
+        exit 1
+        ;;
+esac
