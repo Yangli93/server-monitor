@@ -13,9 +13,55 @@ server-monitor/
 
 ## 环境要求
 
-- Node.js >= 18.x
-- npm >= 9.x
-- bash (Linux/macOS/银河麒麟) 或 Git Bash (Windows)
+### 后端环境
+
+| 项目 | 要求 |
+|------|------|
+| Node.js | >= 18.x |
+| npm | >= 9.x |
+| 端口 | 3001 (可配置) |
+| 内存 | >= 512MB |
+| 磁盘 | >= 1GB |
+
+### 前端环境
+
+| 项目 | 要求 |
+|------|------|
+| Node.js | >= 18.x (开发) |
+| npm | >= 9.x |
+| 浏览器 | Chrome/Firefox/Safari/Edge 最新版 |
+| 端口 | 5173 (开发) / 80 (生产) |
+
+### Agent 环境
+
+| 平台 | Shell | 依赖 |
+|------|-------|------|
+| Linux | bash/sh | md5sum/sha256sum, ss 或 netstat |
+| 银河麒麟 | bash | 同 Linux |
+| Windows | Git Bash / WSL | md5sum, ss/netstat |
+| macOS | bash/zsh | md5, ss 或 netstat |
+
+### Agent 系统命令
+
+Agent 需要以下系统命令（大多数系统默认已安装）：
+
+```bash
+# 必需
+bash/sh       # shell 解释器
+md5sum/md5    # 文件哈希
+date          # 时间戳
+
+# 网络连接监控 (二选一)
+ss            # 推荐
+netstat       # 备选
+
+# 资源监控 (可选，部分系统可用)
+top           # CPU 使用率
+free          # 内存
+df            # 磁盘
+/proc/stat    # Linux CPU 信息
+/proc/meminfo # Linux 内存信息
+```
 
 ## 一、本地开发部署
 
