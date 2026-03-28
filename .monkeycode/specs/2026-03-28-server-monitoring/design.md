@@ -80,6 +80,7 @@ graph TB
 |------|------|
 | Dashboard | 仪表盘展示所有服务器状态 |
 | ServerDetail | 单台服务器详情视图 |
+| ScriptGenerator | 自定义监控脚本生成器 |
 | AlertManager | 告警管理 |
 | Notification | 通知系统 |
 
@@ -176,6 +177,77 @@ graph TD
 | `connection_change` | 外联连接变更 |
 | `resource_alert` | 资源告警 |
 | `status_report` | 完整状态报告（每 60s） |
+
+### ScriptGenerator 功能
+
+```mermaid
+graph TD
+    A[选择监控平台] --> B[选择监控内容]
+    B --> C[配置监控参数]
+    C --> D[生成脚本预览]
+    D --> E{确认生成}
+    E -->|下载| F[下载脚本文件]
+    E -->|复制| G[复制到剪贴板]
+    E -->|部署| H[一键部署到服务器]
+```
+
+#### 监控平台选项
+
+| 平台 | 说明 |
+|------|------|
+| Linux (Ubuntu/CentOS/Debian) | bash 环境 |
+| 银河麒麟 | 国产操作系统，bash |
+| Windows | Git Bash / WSL |
+| macOS | bash/zsh |
+
+#### 监控内容选项
+
+| 类别 | 监控项 |
+|------|--------|
+| **安全文件监控** | 系统文件变更 (`/etc/passwd`, `/etc/shadow`, `~/.ssh/*`) |
+| **外联服务监控** | TCP/UDP 连接、异常外联 IP |
+| **基础资源监控** | CPU、内存、磁盘使用率 |
+| **自定义监控** | 用户自定义脚本/命令 |
+
+#### 脚本生成流程
+
+```
+前端配置 → JSON 参数 → 模板引擎 → Shell 脚本
+```
+
+#### 生成脚本示例
+
+```bash
+#!/bin/bash
+# ===========================================
+# 自动生成的监控脚本
+# 服务器ID: {{SERVER_ID}}
+# 监控平台: {{PLATFORM}}
+# 生成时间: {{GENERATED_TIME}}
+# ===========================================
+
+# 配置区
+SERVER_URL="{{SERVER_URL}}"
+SERVER_ID="{{SERVER_ID}}"
+HEARTBEAT_INTERVAL={{HEARTBEAT_INTERVAL}}
+
+# 监控项配置
+MONITOR_FILES={{MONITOR_FILES}}
+MONITOR_CONNECTIONS={{MONITOR_CONNECTIONS}}
+MONITOR_RESOURCES={{MONITOR_RESOURCES}}
+
+# ... 后续脚本逻辑
+```
+
+#### 界面设计
+
+| 区域 | 内容 |
+|------|------|
+| 平台选择 | 单选框：Linux / 银河麒麟 / Windows / macOS |
+| 监控内容 | 多选框：文件监控、连接监控、资源监控 |
+| 高级配置 | 可折叠：心跳间隔、自定义监控项 |
+| 脚本预览 | 实时预览生成的脚本内容 |
+| 操作按钮 | 下载 / 复制 / 一键部署 |
 
 ### 脚本文件结构
 
