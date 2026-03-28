@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import type { MonitorData, Alert } from '../types';
 
-const API_BASE = 'http://localhost:3001';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://192.168.173.136:3001';
 
 export function useSSELocalhost(serverId: string, onData?: (data: MonitorData) => void) {
   const [connected, setConnected] = useState(false);

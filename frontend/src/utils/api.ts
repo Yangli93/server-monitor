@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:3001';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://192.168.173.136:3001';
 
 export async function fetchServers() {
   const res = await fetch(`${API_BASE}/api/servers`);
