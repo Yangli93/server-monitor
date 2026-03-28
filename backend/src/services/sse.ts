@@ -1,23 +1,29 @@
 import { FastifyRequest } from 'fastify';
-import { SSEResponse } from '../types/index.js';
-import { monitorService, serverService, alertService } from './database.js';
+import { SSEResponse, MonitorData } from '../types/index.js';
+import { monitorService, serverService } from './database.js';
+
+interface SSEController {
+  enqueue: (chunk: string) => void;
+  close: () => void;
+  error: (e: Error) => void;
+}
 
 interface AgentConnection {
   serverId: string;
   request: FastifyRequest;
-  controller: ReadableStreamDefaultController;
+  controller: SSEController;
 }
 
 interface FrontendConnection {
   serverId: string;
-  controller: ReadableStreamDefaultController;
+  controller: SSEController;
 }
 
 class SSEService {
   private agentConnections: Map<string, AgentConnection> = new Map();
   private frontendConnections: Map<string, FrontendConnection> = new Map();
 
-  addAgentConnection(serverId: string, request: FastifyRequest, controller: ReadableStreamDefaultController): void {
+  addAgentConnection(serverId: string, request: FastifyRequest, controller: SSEController): void {
     this.agentConnections.set(serverId, { serverId, request, controller });
     console.log(`Agent connected: ${serverId}. Total agents: ${this.agentConnections.size}`);
   }
@@ -28,7 +34,7 @@ class SSEService {
     console.log(`Agent disconnected: ${serverId}. Total agents: ${this.agentConnections.size}`);
   }
 
-  addFrontendConnection(serverId: string, controller: ReadableStreamDefaultController): void {
+  addFrontendConnection(serverId: string, controller: SSEController): void {
     this.frontendConnections.set(serverId, { serverId, controller });
     console.log(`Frontend subscribed: ${serverId}. Total subscribers: ${this.frontendConnections.size}`);
   }
@@ -63,7 +69,7 @@ class SSEService {
     }
   }
 
-  handleAgentData(serverId: string, data: any): void {
+  handleAgentData(serverId: string, data: MonitorData): void {
     serverService.updateHeartbeat(serverId);
     monitorService.saveData(data);
 

@@ -9,9 +9,9 @@ const INFLUX_BUCKET = process.env.INFLUX_BUCKET || 'monitor';
 const influxDb = new InfluxDB({ url: INFLUX_URL, token: INFLUX_TOKEN });
 
 const writeApi = influxDb.getWriteApi(INFLUX_ORG, INFLUX_BUCKET, 'ns');
-const queryApi = influxDb.getQueryApi(INFLUX_ORG);
 
 const serverDb = new Map<string, Server>();
+const alertDb: Alert[] = [];
 
 export const serverService = {
   create(server: Server): void {
@@ -55,49 +55,22 @@ export const alertService = {
       .timestamp(new Date(alert.createdAt));
 
     writeApi.writePoint(point);
+    alertDb.unshift(alert);
   },
 
   async findAll(limit = 100): Promise<Alert[]> {
-    const query = `
-      from(bucket: "${INFLUX_BUCKET}")
-        |> range(start: -30d)
-        |> filter(fn: (r) => r._measurement == "alerts")
-        |> sort(columns: ["_time"], desc: true)
-        |> limit(n: ${limit})
-    `;
-
-    try {
-      const results: Alert[] = [];
-      const fluxQuery = queryApi.iterRows(query);
-
-      for await (const row of fluxQuery) {
-        if (row.values._field === 'message') {
-          results.push({
-            id: `alert-${row.values._time}`,
-            serverId: row.values.serverId as string,
-            type: row.values.type as Alert['type'],
-            level: row.values.level as Alert['level'],
-            message: row.values._value as string,
-            data: {},
-            acknowledged: false,
-            createdAt: new Date(row.values._time).getTime()
-          });
-        }
-      }
-      return results;
-    } catch (e) {
-      console.error('InfluxDB query error:', e);
-      return [];
-    }
+    return alertDb.slice(0, limit);
   },
 
   async findByServerId(serverId: string): Promise<Alert[]> {
-    const all = await this.findAll(100);
-    return all.filter(a => a.serverId === serverId);
+    return alertDb.filter(a => a.serverId === serverId);
   },
 
   acknowledge(id: string): void {
-    console.log('Alert acknowledged:', id);
+    const alert = alertDb.find(a => a.id === id);
+    if (alert) {
+      alert.acknowledged = true;
+    }
   }
 };
 
@@ -121,11 +94,11 @@ export const monitorService = {
 
     if (data.data.files && data.data.files.length > 0) {
       for (const file of data.data.files) {
-        const alert = {
+        const alert: Alert = {
           id: `file-alert-${data.serverId}-${Date.now()}`,
           serverId: data.serverId,
-          type: 'file_change' as const,
-          level: 'warning' as const,
+          type: 'file_change',
+          level: 'warning',
           message: `文件变更: ${file.path} (${file.action})`,
           data: { path: file.path, action: file.action },
           acknowledged: false,
@@ -140,7 +113,7 @@ export const monitorService = {
     }
 
     if (data.type === 'resource_alert' && data.data.resources) {
-      const { cpu, memory, disk } = data.data.resources;
+      const { cpu, memory } = data.data.resources;
 
       if (cpu > 90) {
         alertService.create({

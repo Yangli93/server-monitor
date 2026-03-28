@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { sseService } from '../services/sse.js';
 import { serverService, alertService } from '../services/database.js';
-import { Server, Alert } from '../types/index.js';
+import { Server } from '../types/index.js';
 
 export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get('/sse/agent/:serverId', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -29,21 +29,20 @@ export async function agentRoutes(fastify: FastifyInstance): Promise<void> {
       'Access-Control-Allow-Origin': '*'
     });
 
-    const encoder = new TextEncoder();
-    const controller = new ReadableStreamDefaultController({
-      enqueue: (chunk) => {
+    const controller = {
+      enqueue: (chunk: Uint8Array) => {
         reply.raw.write(chunk);
       },
       close: () => {
         reply.raw.end();
       },
-      error: (e) => {
+      error: (e: Error) => {
         console.error('SSE error:', e);
         reply.raw.end();
       }
-    } as ReadableStreamDefaultController);
+    };
 
-    sseService.addAgentConnection(serverId, request, controller);
+    sseService.addAgentConnection(serverId, request, controller as any);
 
     reply.raw.on('close', () => {
       sseService.removeAgentConnection(serverId);
@@ -73,20 +72,20 @@ export async function frontendRoutes(fastify: FastifyInstance): Promise<void> {
       'Access-Control-Allow-Origin': '*'
     });
 
-    const controller = new ReadableStreamDefaultController({
-      enqueue: (chunk) => {
+    const controller = {
+      enqueue: (chunk: Uint8Array) => {
         reply.raw.write(chunk);
       },
       close: () => {
         reply.raw.end();
       },
-      error: (e) => {
+      error: (e: Error) => {
         console.error('SSE error:', e);
         reply.raw.end();
       }
-    } as ReadableStreamDefaultController);
+    };
 
-    sseService.addFrontendConnection(serverId, controller);
+    sseService.addFrontendConnection(serverId, controller as any);
 
     reply.raw.on('close', () => {
       sseService.removeFrontendConnection(serverId);
