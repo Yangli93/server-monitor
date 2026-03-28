@@ -1,116 +1,149 @@
-import Database from 'better-sqlite3';
+import { InfluxDB, Point } from '@influxdata/influxdb-client';
 import { Server, Alert, MonitorData } from '../types/index.js';
 
-const db = new Database('monitor.db');
+const INFLUX_URL = process.env.INFLUX_URL || 'http://localhost:8086';
+const INFLUX_TOKEN = process.env.INFLUX_TOKEN || 'my-token';
+const INFLUX_ORG = process.env.INFLUX_ORG || 'my-org';
+const INFLUX_BUCKET = process.env.INFLUX_BUCKET || 'monitor';
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS servers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    status TEXT DEFAULT 'offline',
-    lastHeartbeat INTEGER,
-    createdAt INTEGER
-  );
+const influxDb = new InfluxDB({ url: INFLUX_URL, token: INFLUX_TOKEN });
 
-  CREATE TABLE IF NOT EXISTS alerts (
-    id TEXT PRIMARY KEY,
-    serverId TEXT NOT NULL,
-    type TEXT NOT NULL,
-    level TEXT NOT NULL,
-    message TEXT NOT NULL,
-    data TEXT,
-    acknowledged INTEGER DEFAULT 0,
-    createdAt INTEGER,
-    FOREIGN KEY (serverId) REFERENCES servers(id)
-  );
+const writeApi = influxDb.getWriteApi(INFLUX_ORG, INFLUX_BUCKET, 'ns');
+const queryApi = influxDb.getQueryApi(INFLUX_ORG);
 
-  CREATE INDEX IF NOT EXISTS idx_alerts_serverId ON alerts(serverId);
-  CREATE INDEX IF NOT EXISTS idx_alerts_createdAt ON alerts(createdAt);
-`);
+const serverDb = new Map<string, Server>();
 
 export const serverService = {
   create(server: Server): void {
-    const stmt = db.prepare(`
-      INSERT INTO servers (id, name, platform, status, lastHeartbeat, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(server.id, server.name, server.platform, server.status, server.lastHeartbeat, server.createdAt);
+    serverDb.set(server.id, server);
   },
 
   findAll(): Server[] {
-    const stmt = db.prepare('SELECT * FROM servers ORDER BY createdAt DESC');
-    return stmt.all() as Server[];
+    return Array.from(serverDb.values());
   },
 
   findById(id: string): Server | undefined {
-    const stmt = db.prepare('SELECT * FROM servers WHERE id = ?');
-    return stmt.get(id) as Server | undefined;
+    return serverDb.get(id);
   },
 
   updateStatus(id: string, status: Server['status']): void {
-    const stmt = db.prepare('UPDATE servers SET status = ?, lastHeartbeat = ? WHERE id = ?');
-    stmt.run(status, Date.now(), id);
+    const server = serverDb.get(id);
+    if (server) {
+      server.status = status;
+      server.lastHeartbeat = Date.now();
+    }
   },
 
   updateHeartbeat(id: string): void {
-    const stmt = db.prepare('UPDATE servers SET lastHeartbeat = ?, status = ? WHERE id = ?');
-    stmt.run(Date.now(), 'online', id);
+    const server = serverDb.get(id);
+    if (server) {
+      server.status = 'online';
+      server.lastHeartbeat = Date.now();
+    }
   }
 };
 
 export const alertService = {
   create(alert: Alert): void {
-    const stmt = db.prepare(`
-      INSERT INTO alerts (id, serverId, type, level, message, data, acknowledged, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(
-      alert.id,
-      alert.serverId,
-      alert.type,
-      alert.level,
-      alert.message,
-      JSON.stringify(alert.data),
-      alert.acknowledged ? 1 : 0,
-      alert.createdAt
-    );
+    const point = new Point('alerts')
+      .tag('serverId', alert.serverId)
+      .tag('type', alert.type)
+      .tag('level', alert.level)
+      .stringField('message', alert.message)
+      .stringField('data', JSON.stringify(alert.data))
+      .booleanField('acknowledged', alert.acknowledged)
+      .timestamp(new Date(alert.createdAt));
+
+    writeApi.writePoint(point);
   },
 
-  findAll(limit = 100): Alert[] {
-    const stmt = db.prepare('SELECT * FROM alerts ORDER BY createdAt DESC LIMIT ?');
-    const rows = stmt.all(limit) as any[];
-    return rows.map(row => ({
-      ...row,
-      data: JSON.parse(row.data || '{}'),
-      acknowledged: row.acknowledged === 1
-    }));
+  async findAll(limit = 100): Promise<Alert[]> {
+    const query = `
+      from(bucket: "${INFLUX_BUCKET}")
+        |> range(start: -30d)
+        |> filter(fn: (r) => r._measurement == "alerts")
+        |> sort(columns: ["_time"], desc: true)
+        |> limit(n: ${limit})
+    `;
+
+    try {
+      const results: Alert[] = [];
+      const fluxQuery = queryApi.iterRows(query);
+
+      for await (const row of fluxQuery) {
+        if (row.values._field === 'message') {
+          results.push({
+            id: `alert-${row.values._time}`,
+            serverId: row.values.serverId as string,
+            type: row.values.type as Alert['type'],
+            level: row.values.level as Alert['level'],
+            message: row.values._value as string,
+            data: {},
+            acknowledged: false,
+            createdAt: new Date(row.values._time).getTime()
+          });
+        }
+      }
+      return results;
+    } catch (e) {
+      console.error('InfluxDB query error:', e);
+      return [];
+    }
   },
 
-  findByServerId(serverId: string): Alert[] {
-    const stmt = db.prepare('SELECT * FROM alerts WHERE serverId = ? ORDER BY createdAt DESC');
-    const rows = stmt.all(serverId) as any[];
-    return rows.map(row => ({
-      ...row,
-      data: JSON.parse(row.data || '{}'),
-      acknowledged: row.acknowledged === 1
-    }));
+  async findByServerId(serverId: string): Promise<Alert[]> {
+    const all = await this.findAll(100);
+    return all.filter(a => a.serverId === serverId);
   },
 
   acknowledge(id: string): void {
-    const stmt = db.prepare('UPDATE alerts SET acknowledged = 1 WHERE id = ?');
-    stmt.run(id);
+    console.log('Alert acknowledged:', id);
   }
 };
 
 export const monitorService = {
-  saveData(data: MonitorData): void {
+  async saveData(data: MonitorData): Promise<void> {
+    const timestamp = new Date(data.timestamp);
+
+    if (data.data.resources) {
+      const { cpu, memory, disk } = data.data.resources;
+
+      const point = new Point('server_metrics')
+        .tag('serverId', data.serverId)
+        .tag('host', data.serverId)
+        .floatField('cpu', cpu)
+        .floatField('memory', memory)
+        .floatField('disk', disk)
+        .timestamp(timestamp);
+
+      writeApi.writePoint(point);
+    }
+
+    if (data.data.files && data.data.files.length > 0) {
+      for (const file of data.data.files) {
+        const alert = {
+          id: `file-alert-${data.serverId}-${Date.now()}`,
+          serverId: data.serverId,
+          type: 'file_change' as const,
+          level: 'warning' as const,
+          message: `文件变更: ${file.path} (${file.action})`,
+          data: { path: file.path, action: file.action },
+          acknowledged: false,
+          createdAt: data.timestamp
+        };
+        alertService.create(alert);
+      }
+    }
+
+    if (data.data.connections) {
+      console.log(`Server ${data.serverId} connections:`, data.data.connections);
+    }
+
     if (data.type === 'resource_alert' && data.data.resources) {
       const { cpu, memory, disk } = data.data.resources;
-      const alerts: Alert[] = [];
 
       if (cpu > 90) {
-        alerts.push({
+        alertService.create({
           id: `alert-${data.serverId}-cpu-${Date.now()}`,
           serverId: data.serverId,
           type: 'resource_alert',
@@ -123,7 +156,7 @@ export const monitorService = {
       }
 
       if (memory > 90) {
-        alerts.push({
+        alertService.create({
           id: `alert-${data.serverId}-memory-${Date.now()}`,
           serverId: data.serverId,
           type: 'resource_alert',
@@ -134,10 +167,14 @@ export const monitorService = {
           createdAt: Date.now()
         });
       }
-
-      for (const alert of alerts) {
-        alertService.create(alert);
-      }
     }
   }
 };
+
+export async function flushWrite(): Promise<void> {
+  try {
+    await writeApi.flush();
+  } catch (e) {
+    console.error('Failed to flush InfluxDB:', e);
+  }
+}

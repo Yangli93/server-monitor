@@ -15,7 +15,7 @@
 | 后端 | Node.js + TypeScript + Fastify |
 | SSE | 原生 EventSource |
 | Agent | Shell 脚本 |
-| 数据存储 | SQLite |
+| 数据存储 | InfluxDB (时序数据库) |
 
 ## 3. 功能列表
 

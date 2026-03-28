@@ -8,9 +8,11 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "fastify": "^5.2.1",
     "@fastify/cors": "^10.0.2",
+    "@influxdata/influxdb-client": "^1.35.0",
     "better-sqlite3": "^11.8.1",
+    "fastify": "^5.2.1",
+    "influxdb": "^0.0.1",
     "tsx": "^4.19.2"
   },
   "devDependencies": {

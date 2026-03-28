@@ -278,7 +278,80 @@ ansible -i inventory all -m script -a "monitor.sh install"
 
 ---
 
-## 五、Docker 部署 (可选)
+## 五、InfluxDB 部署 (时序数据库)
+
+### 1. Docker 部署 InfluxDB
+
+```bash
+docker run -d \
+  --name influxdb \
+  -p 8086:8086 \
+  -p 8083:8083 \
+  -v influxdb-data:/var/lib/influxdb \
+  influxdb:latest
+```
+
+### 2. 配置 InfluxDB
+
+访问 http://localhost:8083 创建数据库：
+
+```bash
+# 创建组织
+influx org create -n my-org
+
+# 创建 bucket
+influx bucket create -n monitor -o my-org
+
+# 创建 token
+influx auth create -o my-org -b monitor -r read,write
+```
+
+### 3. 环境变量配置
+
+```bash
+# 后端 .env 文件
+INFLUX_URL=http://localhost:8086
+INFLUX_TOKEN=your-token-here
+INFLUX_ORG=my-org
+INFLUX_BUCKET=monitor
+```
+
+### 4. InfluxDB Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  influxdb:
+    image: influxdb:latest
+    ports:
+      - "8086:8086"
+      - "8083:8083"
+    volumes:
+      - influxdb-data:/var/lib/influxdb
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword
+      - DOCKER_INFLUXDB_INIT_ORG=my-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=monitor
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token
+
+volumes:
+  influxdb-data:
+```
+
+### 5. InfluxDB 特点
+
+| 特性 | 说明 |
+|------|------|
+| 时序优化 | 高写入性能，数据压缩 |
+| 保留策略 | 自动数据过期清理 |
+| 查询 | Flux/InfluxQL 查询语言 |
+| 扩展 | 支持集群模式水平扩展 |
+
+---
+
+## 六、Docker 部署 (可选)
 
 ### Dockerfile (后端)
 

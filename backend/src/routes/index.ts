@@ -112,7 +112,7 @@ export async function apiRoutes(fastify: FastifyInstance): Promise<void> {
   });
 
   fastify.get('/api/alerts', async (request, reply) => {
-    const alerts = alertService.findAll();
+    const alerts = await alertService.findAll();
     return reply.send({ alerts });
   });
 
